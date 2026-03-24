@@ -1,517 +1,207 @@
-"""
-- FrankWolfeUserEquilibrium
-- FrankWolfeSystemOptimal
-- GradientProjectionUserEquilibrium
-- GradientProjectionSystemOptimal
-"""
-from load_network import Network, Path, Link
-from utility import spp_algorithm_list, obtain_path_cost, obtain_path_marginal_cost
+from build_network import Network, Path
 
-from copy import deepcopy
-import time
-from typing import Callable, Literal
-from math import inf
+from time import perf_counter as pc
+from typing import Literal
 
 
-__all__ = ["solve"]
+Var = Literal["mc", "c"]
 
 
-def solve(network_name: str = "SiouxFalls",
-          TA_type: Literal["SO", "UE"] = "UE",
-          main_algorithm: Literal["FW", "GP", "MSA"] = "GP",
-          spp_algorithm: Literal["GLC", "LC", "LS", "LSF"] = "LS",
-          bisection_gap: float = 1e-4,
-          main_gap: float = 1e-4,
-          verbose: bool = False):
-    # all the models
-    network = Network(name=network_name)
-    model_dict = {"UE": {"FW": FrankWolfeUserEquilibrium(network=network, algorithm=spp_algorithm,
-                                                         bisection_gap=bisection_gap, main_gap=main_gap,
-                                                         verbose=verbose),
-                         "GP": GradientProjectionUserEquilibrium(network=network, algorithm=spp_algorithm,
-                                                                 main_gap=main_gap, verbose=verbose),
-                         "MSA": MSAUserEquilibrium(network=network, algorithm=spp_algorithm,
-                                                          main_gap=main_gap, verbose=verbose)},
-                  "SO": {"FW": FrankWolfeSystemOptimal(network=network, algorithm="LS_SO",
-                                                         bisection_gap=bisection_gap, main_gap=main_gap,
-                                                       verbose=verbose),
-                         "GP": GradientProjectionSystemOptimal(network=network, algorithm="LS_SO",
-                                                                 main_gap=main_gap, verbose=verbose)},
-                  }
-    # run the model
-    current_model = model_dict[TA_type][main_algorithm]
-    current_model.run()
-
-
-
-class FrankWolfeUserEquilibrium:
-    def __init__(self, network, algorithm, bisection_gap, main_gap, verbose=False):
-        self.network: Network = network
-        self.ssp_algorithm: Callable[[Network, int, int], list[Link]] = spp_algorithm_list[algorithm]
-        self.bisection_gap: float = bisection_gap  # bisection method convergence
-        self.main_gap: float = main_gap  # Frank-Wolfe algorithm convergence
-        self.verbose: bool = verbose
-
-    def run(self) -> None:
-        s = time.perf_counter()
-        print("Initializing...")
-        iter_times = 0
-        cur_gap = inf
-        self.all_or_nothing()
-        for link in self.network.link_set:
-            link.flow = link.auxiliary_flow
-        while cur_gap > self.main_gap:
-            self.update_costs()
-            self.all_or_nothing()
-            step = self.bisection()
-            self.update_flow(step)
-            cur_gap = self.convergence()
+class LinkBased:
+    def run_FW_UE(self, network: Network, tol_gap: float = 1e-4, verbose: bool = False):
+        start_time, iter_times, cur_gap = pc(), 0, float('inf')
+        self.all_or_nothing(network, "c")
+        for link in network.link_set:
+            link.flow = link.aux_flow
+        while cur_gap > tol_gap:
+            network.update_all_link_cost()
+            self.all_or_nothing(network, "c")
+            step = self.bisection(network, "c")
+            self.update_flow(step, network)
+            cur_gap = RG(network, "c")
             iter_times += 1
-            if self.verbose:
-                print("\r", end="")
-                print(f"Iteration {iter_times}: Gap={cur_gap}", end="")
-        e = time.perf_counter()
-        if self.verbose:
-            print(f"\nFW for UE finished, time={e-s:.2f}s, tstt={self.network.total_system_travel_time()}")
+            if verbose:
+                print(f"Iteration {iter_times}: current gap={cur_gap}")
+        print(f"Running time={pc()-start_time:.5f}s, TSTT={network.tstt}")
 
-    def update_costs(self) -> None:
-        for link in self.network.link_set[1:]:
-            link.update_cost()
-
-    def update_flow(self, step: float) -> None:
-        for link in self.network.link_set[1:]:
-            link.flow = link.flow + step * (link.auxiliary_flow - link.flow)
-
-    def all_or_nothing(self) -> None:
-        for link in self.network.link_set[1:]:
-            link.auxiliary_flow = 0
-        for od in self.network.od_pair_set:
-            ori = od.origin
-            dest = od.destination
-            demand = od.demand
-            shortest_links = self.ssp_algorithm(self.network, ori.node_id, dest.node_id)
-            for link in shortest_links:
-                link.auxiliary_flow += demand
-
-    def derivative_f(self, alpha) -> float:
-        return sum([link.get_specific_cost(link.flow + alpha * (link.auxiliary_flow - link.flow))
-                    * (link.auxiliary_flow - link.flow) for link in self.network.link_set[1:]])
-
-    def bisection(self) -> float:
-        left, right, mid = 0, 1, 0.5
-        max_iter_times = 500
-        iter_times = 1
-        while abs(self.derivative_f(mid)) > self.bisection_gap:
+    def run_FW_SO(self, network: Network, tol_gap: float = 1e-4, verbose: bool = False):
+        start_time, iter_times, cur_gap = pc(), 0, float('inf')
+        self.all_or_nothing(network, "mc")
+        for link in network.link_set:
+            link.flow = link.aux_flow
+        while cur_gap > tol_gap:
+            network.update_all_link_marginal_cost()
+            self.all_or_nothing(network, "mc")
+            step = self.bisection(network, "mc")
+            self.update_flow(step, network)
+            cur_gap = RG(network, "mc")
             iter_times += 1
-            if iter_times == max_iter_times:
-                raise RuntimeError('Reach maximum iteration times in bisection part but still fail to converge.')
-            elif self.derivative_f(mid) * self.derivative_f(right) > 0:
-                right = mid
-            else:
-                left = mid
-            mid = (right + left) / 2
-        return mid
-
-    def convergence(self) -> float:
-        numerator = sum([link.flow * link.cost for link in self.network.link_set[1:]])
-        denominator = sum([link.auxiliary_flow * link.cost for link in self.network.link_set[1:]])
-        return numerator / denominator - 1
-
-
-class FrankWolfeSystemOptimal:
-    def __init__(self, network, algorithm, bisection_gap, main_gap, verbose=False):
-        self.network: Network = network
-        self.ssp_algorithm: Callable[[Network, int, int], list[Link]] = spp_algorithm_list[algorithm]
-        self.bisection_gap: float = bisection_gap  # bisection method convergence
-        self.main_gap: float = main_gap  # Frank-Wolfe algorithm convergence
-        self.verbose: bool = verbose
-
-    def run(self) -> None:
-        s = time.perf_counter()
-        print("Initializing...")
-        iter_times = 0
-        cur_gap = inf
-        self.all_or_nothing()
-        for link in self.network.link_set[1:]:
-            link.flow = link.auxiliary_flow
-        while cur_gap > self.main_gap:
-            self.update_costs()
-            self.all_or_nothing()
-            step = self.bisection()
-            self.update_flow(step)
-            cur_gap = self.convergence()
-            iter_times += 1
-            if self.verbose:
-                print("\r", end="")
-                print(f"Iteration {iter_times}: Gap={cur_gap}", end="")
-        e = time.perf_counter()
-        if self.verbose:
-            print(f"\nFW for SO finished, time={e - s:.2f}s, tstt={self.network.total_system_travel_time()}")
-
-    def update_costs(self) -> None:
-        for link in self.network.link_set[1:]:
-            link.update_cost()
-            link.update_marginal_cost()
-
-    def update_flow(self, step: float) -> None:
-        for link in self.network.link_set[1:]:
-            link.flow = link.flow + step * (link.auxiliary_flow - link.flow)
-
-    def all_or_nothing(self) -> None:
-        for link in self.network.link_set[1:]:
-            link.auxiliary_flow = 0
-        for od in self.network.od_pair_set:
-            ori = od.origin
-            dest = od.destination
-            demand = od.demand
-            shortest_links = self.ssp_algorithm(self.network, ori.node_id, dest.node_id)
-            for link in shortest_links:
-                link.auxiliary_flow += demand
-
-    def derivative_f(self, alpha) -> float:
-        return sum([link.get_specific_marginal_cost(link.flow + alpha * (link.auxiliary_flow - link.flow))
-                    * (link.auxiliary_flow - link.flow) for link in self.network.link_set[1:]])
-
-    def bisection(self) -> float:
-        left, right, mid = 0, 1, 0.5
-        max_iter_times = 500
-        iter_times = 1
-        while abs(self.derivative_f(mid)) > self.bisection_gap:
-            iter_times += 1
-            if iter_times == max_iter_times:
-                raise RuntimeError('Reach maximum iteration times in bisection part but still fail to converge.')
-            elif self.derivative_f(mid) * self.derivative_f(right) > 0:
-                right = mid
-            else:
-                left = mid
-            mid = (right + left) / 2
-        return mid
-
-    def convergence(self) -> float:
-        numerator = sum([link.flow * link.marginal_cost for link in self.network.link_set[1:]])
-        denominator = sum([link.auxiliary_flow * link.marginal_cost for link in self.network.link_set[1:]])
-        return numerator / denominator - 1
-
-
-class GradientProjectionUserEquilibrium:
-    def __init__(self, network, algorithm, main_gap, verbose=False):
-        self.network: Network = network
-        self.ssp_algorithm: Callable[[Network, int, int], list] = spp_algorithm_list[algorithm]
-        self.main_gap: float = main_gap  # Frank-Wolfe algorithm convergence
-        self.verbose: bool = verbose
-
-    def run(self):
-        s = time.perf_counter()
-        self.initialize_working_path_set()
-        iter_times, cur_gap, cur_gap_list = 0, inf, list()
-        while cur_gap > self.main_gap:
-            for od in self.network.od_pair_set:
-                path = self.find_shortest_path_add_to_working_set(od)
-                self.shift_flow_between_od(od, path)
-                self.drop_unused_path(od)
-            cur_gap = self.current_gap()
-            iter_times += 1
-            if self.verbose:
-                print("\r", end="")
-                print(f"Iteration {iter_times}: Gap={cur_gap}", end="")
-        e = time.perf_counter()
-        if self.verbose:
-            print(f"\nGP for UE finished, time={e - s:.2f}s, TSTT = {self.network.total_system_travel_time()}")
-
-    def initialize_working_path_set(self):
-        for od in self.network.od_pair_set:
-            origin, destination, demand = od.origin, od.destination, od.demand
-            sp = self.ssp_algorithm(self.network, origin.node_id, destination.node_id)
-            path = Path(origin, destination, sp)
-            path.path_flow = demand
-            od.working_path_set.append(path)
-            for link in path.included_links:
-                link.flow += demand
-        self.network.update_all_link_cost()
-        self.network.update_all_working_path_cost()
-
-    def find_shortest_path_add_to_working_set(self, od):
-        origin, destination, demand = od.origin, od.destination, od.demand
-        sp = self.ssp_algorithm(self.network, origin.node_id, destination.node_id)
-        for working_path in od.working_path_set:
-            if working_path.included_links == sp:
-                path = working_path
-                break
-        else:
-            path = Path(origin, destination, sp)
-            od.working_path_set.append(path)
-        return path
-
-    def shift_flow_between_od(self, od, path):
-        for working_path in od.working_path_set:
-            if working_path == path:
-                continue
-            temp = sum([link.derivative() for link in
-                        list(set(working_path.included_links) ^ set(path.included_links))])
-            shifted_flow = min((working_path.path_cost - path.path_cost) / temp, working_path.path_flow)
-            # update travel times
-            working_path.path_flow -= shifted_flow
-            for link in working_path.included_links:
-                link.flow -= shifted_flow
-            path.path_flow += shifted_flow
-            for link in path.included_links:
-                link.flow += shifted_flow
-            self.network.update_all_link_cost()
-            self.network.update_all_working_path_cost()
-
-    @staticmethod
-    def drop_unused_path(od):
-        od.working_path_set = [path for path in od.working_path_set if path.path_flow > 0]
-
-    def current_gap(self):
-        SPTT = 0
-        for od in self.network.od_pair_set:
-            origin, destination, demand = od.origin.node_id, od.destination.node_id, od.demand
-            min_path = self.ssp_algorithm(self.network, origin, destination)
-            min_dist = obtain_path_cost(min_path)
-            SPTT += min_dist * od.demand
-        TSTT = sum([link.flow * link.cost for link in self.network.link_set[1:]])
-        return (TSTT / SPTT) - 1
-
-
-class GradientProjectionSystemOptimal:
-    def __init__(self, network, algorithm, main_gap, verbose=False):
-        self.network: Network = network
-        self.ssp_algorithm: Callable[[Network, int, int], list] = spp_algorithm_list[algorithm]
-        self.main_gap: float = main_gap  # Frank-Wolfe algorithm convergence
-        self.verbose: bool = verbose
-
-    def run(self):
-        s = time.perf_counter()
-        self.initialize_working_path_set()
-        iter_times, cur_gap = 0, inf
-        while cur_gap > self.main_gap:
-            for od in self.network.od_pair_set:
-                path = self.find_shortest_marginal_path_add_to_working_set(od)
-                self.shift_flow_between_od(od, path)
-                self.drop_unused_path(od)
-            cur_gap = self.current_gap()
-            iter_times += 1
-            if self.verbose:
-                print("\r", end="")
-                print(f"Iteration {iter_times}: Gap={cur_gap}", end="")
-        e = time.perf_counter()
-        if self.verbose:
-            print(f"\nGP for SO finished, time={e - s:.2f}s, tstt={self.network.total_system_travel_time()}")
-
-    def initialize_working_path_set(self):
-        for od_id, od in enumerate(self.network.od_pair_set):
-            od.working_path_set = list()
-            origin, destination, demand = od.origin, od.destination, od.demand
-            sp = self.ssp_algorithm(self.network, origin.node_id, destination.node_id)
-            path = Path(origin, destination, sp)
-            path.path_flow = demand
-            od.working_path_set.append(path)
-            for link in path.included_links:
-                link.flow += demand
-        self.network.update_all_link_marginal_cost()
-        self.network.update_all_working_path_marginal_cost()
-
-    def find_shortest_marginal_path_add_to_working_set(self, od):
-        origin, destination, demand = od.origin, od.destination, od.demand
-        sp = self.ssp_algorithm(self.network, origin.node_id, destination.node_id)
-        for working_path in od.working_path_set:
-            if working_path.included_links == sp:
-                path = working_path
-                break
-        else:
-            path = Path(origin, destination, sp)
-            od.working_path_set.append(path)
-        return path
-
-    def shift_flow_between_od(self, od, path):
-        for working_path in od.working_path_set:
-            if working_path == path:
-                continue
-            temp = sum([link.marginal_cost_function_derivative() for link in
-                        list(set(working_path.included_links) ^ set(path.included_links))])
-            shifted_flow = min((working_path.path_marginal_cost - path.path_marginal_cost) / temp,
-                               working_path.path_flow)
-            # update travel times
-            working_path.path_flow -= shifted_flow
-            for link in working_path.included_links:
-                link.flow -= shifted_flow
-            path.path_flow += shifted_flow
-            for link in path.included_links:
-                link.flow += shifted_flow
-            self.network.update_all_link_marginal_cost()
-            self.network.update_all_working_path_marginal_cost()
-            self.network.update_all_link_cost()
-
-    @staticmethod
-    def drop_unused_path(od):
-        od.working_path_set = [path for path in od.working_path_set if path.path_flow > 0]
-
-    def current_gap(self):
-        SPTT = 0
-        for od in self.network.od_pair_set:
-            origin, destination, demand = od.origin.node_id, od.destination.node_id, od.demand
-            min_path = self.ssp_algorithm(self.network, origin, destination)
-            min_dist = obtain_path_marginal_cost(min_path)
-            SPTT += min_dist * demand
-        TSTT = sum([link.flow * link.marginal_cost for link in self.network.link_set[1:]])
-        cur_gap = (TSTT / SPTT) - 1
-        return cur_gap
-
-
-class MSAUserEquilibrium:
-    def __init__(self, network, algorithm, main_gap, verbose=False):
-        self.network: Network = network
-        self.ssp_algorithm: Callable[[Network, int, int], list[Link]] = spp_algorithm_list[algorithm]
-        self.main_gap: float = main_gap
-        self.verbose: bool = verbose
-
-    def run(self) -> None:
-        s = time.perf_counter()
-        print("Initializing...")
-        cur_gap, iter_times = inf, 0
-        self.all_or_nothing()
-        for link in self.network.link_set:
-            link.flow = link.auxiliary_flow
-        while cur_gap > self.main_gap:
-            iter_times += 1
-            self.update_costs()
-            self.all_or_nothing()
-            step = 1 / (iter_times + 1)
-            self.update_flow(step)
-            cur_gap = self.convergence()
-            if self.verbose:
-                print("\r", end="")
-                print(f"Iteration {iter_times}: Gap={cur_gap}", end="")
-        e = time.perf_counter()
-        if self.verbose:
-            print(f"\nFW for MSA finished, time={e-s:.2f}s, tstt={self.network.total_system_travel_time()}")
-
-    def update_costs(self) -> None:
-        for link in self.network.link_set[1:]:
-            link.update_cost()
-
-    def update_flow(self, step: float) -> None:
-        for link in self.network.link_set[1:]:
-            link.flow = link.flow + step * (link.auxiliary_flow - link.flow)
-
-    def all_or_nothing(self) -> None:
-        for link in self.network.link_set[1:]:
-            link.auxiliary_flow = 0
-        for od in self.network.od_pair_set:
-            ori = od.origin
-            dest = od.destination
-            demand = od.demand
-            shortest_links = self.ssp_algorithm(self.network, ori.node_id, dest.node_id)
-            for link in shortest_links:
-                link.auxiliary_flow += demand
-
-    def convergence(self) -> float:
-        numerator = sum([link.flow * link.cost for link in self.network.link_set[1:]])
-        denominator = sum([link.auxiliary_flow * link.cost for link in self.network.link_set[1:]])
-        return numerator / denominator - 1
-
-
-"""
-1 Find the shortest path based on the flows at last iteration
-2 Only update flow after all OD pairs are shifted
-3 Consider Bellman's optimality principle
-4 Consider parallel computing (less important)
-5 Consider the optimal step size to update the flow, as in the Frank-Wolfe algorithm
-"""
-class GradientProjectionUserEquilibriumJacobi:
-    def __init__(self, network, algorithm, main_gap, verbose=False):
-        self.network: Network = network
-        self.ssp_algorithm: Callable[[Network, int, int], list] = spp_algorithm_list[algorithm]
-        self.main_gap: float = main_gap
-        self.verbose: bool = verbose
-
-    def run(self):
-        s = time.perf_counter()
-        self.initialize_working_path_set()
-        iter_times, cur_gap, cur_gap_list = 0, inf, list()
-        while cur_gap > self.main_gap:
-            for od in self.network.od_pair_set:
-                copy_net = deepcopy(self.network)
-                copy_od = copy_net.od_pair_set[self.network.od_pair_set.index(od)]
-                path = self.find_shortest_path_add_to_working_set(copy_od, copy_net)
-                self.shift_flow_between_od(copy_od, path, copy_net)
-                self.drop_unused_path(od)
-                # TODO: finish update_origin_network_path_flow
-                self.update_origin_network_path_flow(od.origin.node_id, od.destination.node_id, self.network, copy_net)
-            # TODO: finish update_all_link_flows
-            self.network.update_all_link_flows()
-            self.network.update_all_link_cost()
-            self.network.update_all_working_path_cost()
-            cur_gap = self.current_gap()
-            iter_times += 1
-            if self.verbose:
-                print("\r", end="")
-                print(f"Iteration {iter_times}: Gap={cur_gap}", end="")
-        e = time.perf_counter()
-        if self.verbose:
-            print(f"\nGP for UE finished, time={e - s:.2f}s, TSTT = {self.network.total_system_travel_time()}")
-
-    def initialize_working_path_set(self):
-        for od in self.network.od_pair_set:
-            origin, destination, demand = od.origin, od.destination, od.demand
-            sp = self.ssp_algorithm(self.network, origin.node_id, destination.node_id)
-            path = Path(origin, destination, sp)
-            path.path_flow = demand
-            od.working_path_set.append(path)
-            for link in path.included_links:
-                link.flow += demand
-        self.network.update_all_link_cost()
-        self.network.update_all_working_path_cost()
-
-    def find_shortest_path_add_to_working_set(self, od, net):
-        origin, destination, demand = od.origin, od.destination, od.demand
-        sp = self.ssp_algorithm(net, origin.node_id, destination.node_id)
-        for working_path in od.working_path_set:
-            if working_path.included_links == sp:
-                path = working_path
-                break
-        else:
-            path = Path(origin, destination, sp)
-            od.working_path_set.append(path)
-        return path
-
-    def shift_flow_between_od(self, od, path, net):
-        for working_path in od.working_path_set:
-            if working_path == path:
-                continue
-            temp = sum([link.derivative() for link in
-                        list(set(working_path.included_links) ^ set(path.included_links))])
-            shifted_flow = min((working_path.path_cost - path.path_cost) / temp, working_path.path_flow)
-            # update link and path flow
-            working_path.path_flow -= shifted_flow
-            for link in working_path.included_links:
-                link.flow -= shifted_flow
-            path.path_flow += shifted_flow
-            for link in path.included_links:
-                link.flow += shifted_flow
-            net.update_all_link_cost()
-            net.update_all_working_path_cost()
-
-    @staticmethod
-    def drop_unused_path(od):
-        od.working_path_set = [path for path in od.working_path_set if path.path_flow > 0]
-
-    def current_gap(self):
-        SPTT = 0
-        for od in self.network.od_pair_set:
-            origin, destination, demand = od.origin.node_id, od.destination.node_id, od.demand
-            min_path = self.ssp_algorithm(self.network, origin, destination)
-            min_dist = obtain_path_cost(min_path)
-            SPTT += min_dist * od.demand
-        TSTT = sum([link.flow * link.cost for link in self.network.link_set[1:]])
-        return (TSTT / SPTT) - 1
-
-    def update_origin_network_path_flow(self, o_id, d_id, origin_network, copy_network):
+            if verbose:
+                print(f"Iteration {iter_times}: current gap={cur_gap}")
+        network.update_all_link_cost()
+        print(f"Running time={pc()-start_time:.5f}s, TSTT={network.tstt}")
+    
+    def run_CFW_UE(self):  # conjugate FW
         pass
+
+    def run_CFW_SO(self):
+        pass
+
+    def run_BCFW_UE(self):  # bi-conjugate FW
+        pass
+
+    def run_BCFW_SO(self):  # bi-conjugate FW
+        pass
+
+    def update_flow(self, step: float, network: Network) -> None:
+        for link in network.link_set[1:]:
+            link.flow = link.flow + step * (link.aux_flow - link.flow)
+
+    def all_or_nothing(self, network: Network, cost_type: Var) -> None:
+        for link in network.link_set[1:]:
+            link.aux_flow = 0
+        for od in network.od_set:
+            path, _ = od.shortest_path_and_cost(cost_type=cost_type)
+            for link in path:
+                link.aux_flow += od.demand
+
+    def bisection(self, network: Network, cost_type: Var) -> float:
+        def derivative_f(alpha: float, network: Network, cost_type: Var) -> float:
+            if cost_type == "c":
+                res = sum([link.get_cost(link.flow + alpha * (link.aux_flow - link.flow)) 
+                        * (link.aux_flow - link.flow) for link in network.link_set[1:]])
+            else:
+                res = sum([link.get_marginal_cost(link.flow + alpha * (link.aux_flow - link.flow)) 
+                        * (link.aux_flow - link.flow) for link in network.link_set[1:]])
+            return res
+        left, right, mid = 0, 1, 0.5
+        max_iter_times, iter_times = 30, 1
+        while iter_times < max_iter_times:
+            if derivative_f(mid, network, cost_type) * derivative_f(right, network, cost_type) > 0:
+                right = mid
+            else:
+                left = mid
+            mid = (right + left) / 2
+            iter_times += 1
+        return mid
+
+
+class PathBased:
+    def run_GP_UE(self, network: Network, tol_gap: float = 1e-4, verbose: bool = False):
+        start_time = pc()
+        # 1 initialize working set
+        for od in network.od_set:
+            path = Path(od.origin, od.destination, od.shortest_path_and_cost(cost_type="c")[0])
+            path.add_flow(od.demand)
+            od.working_set.append(path)
+            for link in path.included_links:
+                link.update_cost()
+        # 2 Main loop: shift flow
+        iter_times, cur_gap = 0, float('inf')
+        while cur_gap > tol_gap:
+            for od in network.od_set:
+                # 2a find the shortest path and add it to the working set if it's not in there
+                basic_path, min_dist = od.shortest_path_and_cost(cost_type="c")
+                for path in od.working_set:
+                    if path.included_links == basic_path:
+                        basic_path = path
+                        break
+                else:
+                    basic_path = Path(od.origin, od.destination, basic_path)
+                    od.working_set.append(basic_path)
+                # 2b shift flow
+                for non_basic_path in od.working_set:
+                    if non_basic_path == basic_path:
+                        continue
+                    xor_links = set(non_basic_path.included_links) ^ set(basic_path.included_links)
+                    denominator = sum([link.cost_function_derivative for link in xor_links])
+                    shifted_flow = min((non_basic_path.cost - min_dist) / denominator, non_basic_path.flow)
+                    non_basic_path.add_flow(-shifted_flow)
+                    basic_path.add_flow(shifted_flow)
+                    for link in xor_links:
+                        link.update_cost()
+                # 3 drop the unused working path
+                od.working_set = [path for path in od.working_set if path.flow > 0]
+            # 4 convergence check
+            cur_gap = RG(network, cost_type="c")
+            iter_times += 1
+            if verbose:
+                print(f'Iteration {iter_times}: current gap = {cur_gap}')
+        print(f"Running time = {pc() - start_time:.5f}, TSTT = {network.tstt}")
+
+    def run_GP_SO(self, network: Network, tol_gap: float = 1e-4, verbose: bool = False):
+        start_time = pc()
+        # 1 initialize working set
+        for od in network.od_set:
+            path = Path(od.origin, od.destination, od.shortest_path_and_cost(cost_type="mc")[0])
+            path.add_flow(od.demand)
+            od.working_set.append(path)
+            for link in path.included_links:
+                link.update_marginal_cost()
+        # 2 Main loop: shift flow
+        iter_times, cur_gap = 0, float('inf')
+        while cur_gap > tol_gap:
+            for od in network.od_set:
+                # 2a find the shortest path and add it to the working path set if it's not in there
+                basic_path, min_dist = od.shortest_path_and_cost(cost_type="mc")
+                for working_path in od.working_set:
+                    if working_path.included_links == basic_path:
+                        basic_path = working_path
+                        break
+                else:
+                    basic_path = Path(od.origin, od.destination, basic_path)
+                    od.working_set.append(basic_path)
+                # 2b shift flow
+                for working_path in od.working_set:
+                    if working_path == basic_path:
+                        continue
+                    xor_links = set(working_path.included_links) ^ set(basic_path.included_links)
+                    temp = sum([link.marginal_cost_function_derivative for link in xor_links])
+                    shifted_flow = min((working_path.marginal_cost - min_dist) / temp, working_path.flow)
+                    working_path.add_flow(-shifted_flow)
+                    basic_path.add_flow(shifted_flow)
+                    for link in xor_links:
+                        link.update_marginal_cost()
+                # 3 drop the unused working path
+                od.working_set = [path for path in od.working_set if path.flow > 0]
+            # 4 convergence check
+            cur_gap = RG(network, cost_type="mc")
+            iter_times += 1
+            if verbose:
+                print(f'Iteration {iter_times}: current gap = {cur_gap}')
+        network.update_all_link_cost()
+        print(f"Running time = {pc() - start_time:.5f}, TSTT = {network.tstt}")
+    
+    def run_MS_UE(self):  # Manifold suboptimization
+        pass
+
+    def run_MS_SO(self):  # Manifold suboptimization
+        pass
+
+
+class BushBased:
+    pass
+
+
+
+def RG(network: Network, cost_type: Var = "c") -> float:  # classic relative gap
+    denominator = 0
+    for od in network.od_set:
+        _, min_dist = od.shortest_path_and_cost(cost_type=cost_type)
+        denominator += min_dist * od.demand
+    numerator = network.tstt if cost_type == "c" else sum([link.flow * link.marginal_cost for link in network.link_set[1:]])
+    return numerator / denominator - 1
+
+
+def AEC(network):  # average excess cost
+    pass
+
+
+def MEC(network):  # maximum excess cost
+    pass
 
 
 if __name__ == "__main__":
     sf = Network(name="SiouxFalls")
-    model = GradientProjectionUserEquilibriumJacobi(network=sf, algorithm="LS", main_gap=1e-4, verbose=True)
-    model.run()
+    solver = PathBased()
+    solver.run_GP_UE(sf, tol_gap=1e-4, verbose=True)
