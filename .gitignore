@@ -1,7 +1,9 @@
-.vscode/
+PyVersion/.vscode
 
-TransportationNetworks/
+PyVersion/__pycache__
 
-__pycache__/
+PyVersion/data
 
-test.py
+CppVersion/data
+
+papers/
