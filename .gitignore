@@ -1,4 +1,4 @@
-PyVersion/.vscode
+﻿PyVersion/.vscode
 
 PyVersion/__pycache__
 
@@ -7,3 +7,5 @@ PyVersion/data
 CppVersion/data
 
 papers/
+
+TNM/
