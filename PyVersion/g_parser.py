@@ -36,20 +36,20 @@ class NetworkParser:
         pattern = re.compile(r"[0-9A-Za-z.~]+")
         lines = [pattern.findall(line) for line in lines if pattern.findall(line) != []]
 
-        num_node, num_link = None, None
+        num_link = None
         for i in range(len(lines)):
             line = lines[i]
             if "NUMBER" in line and "NODES" in line:
-                num_node = int(line[-1])
+                network.num_node = int(line[-1])
             if "NUMBER" in line and "LINKS" in line:
                 num_link = int(line[-1])
             if "~" in line and "capacity" in line:
                 lines = lines[i + 1:]
                 break
-        if num_node is None or num_link is None:
+        if network.num_node is None or num_link is None:
             raise ValueError(f"Cannot parse number of nodes and links from {file_path}")
 
-        network.node_set = [Node(i) for i in range(num_node)]
+        network.node_set = [Node(i) for i in range(network.num_node)]
         for line in lines:
             network.add_link(
                 tail_id=int(float(line[0]) - 1),

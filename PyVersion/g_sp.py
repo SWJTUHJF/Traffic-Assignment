@@ -1,21 +1,45 @@
 ﻿from __future__ import annotations
 
+from dataclasses import dataclass
 from heapq import heappop, heappush
-from math import inf
 from typing import Literal, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from g_network import Link, Network, Node
 
 
+@dataclass
+class SearchResult:
+    origin: Node
+    dist: dict
+    prev_link: dict
+    _resticted: bool
+
+    def path_to(self, destination) -> list[Link]:
+        if self.prev_link[destination] is None:
+            if not self._resticted:
+                return []
+            raise ValueError(f"No path from {self.origin.node_id} to {destination.node_id}")
+
+        path, node = [], destination
+        while node is not self.origin:
+            link = self.prev_link[node]
+            path.append(link)
+            node = link.tail
+
+        path.reverse()
+        return path
+
+
 def dijkstra(
     network: Network,
     origin: Node,
-    destination: Node,
+    destination: Node | None = None,
     cost_type: Literal["c", "mc"] = "c",
     resticted: bool = True,
-) -> list[Link]:
-    dist = {node: inf for node in network.node_set}
+    pre_terminate: bool = True,
+) -> SearchResult:
+    dist: dict[Node, float] = {node: float('inf') for node in network.node_set}
     prev_link: dict[Node, Link | None] = {node: None for node in network.node_set}
 
     dist[origin] = 0.0
@@ -25,7 +49,7 @@ def dijkstra(
         current_dist, _, current = heappop(pq)
         if current_dist > dist[current]:
             continue
-        if current is destination:
+        if destination is not None and current is destination and pre_terminate:
             break
 
         for link in current.link_out:
@@ -37,17 +61,4 @@ def dijkstra(
                 prev_link[nxt] = link
                 heappush(pq, (proposal, nxt.node_id, nxt))
 
-    if origin is not destination and prev_link[destination] is None:
-        if not resticted:
-            return []
-        raise ValueError(f"No path from {origin.node_id} to {destination.node_id} in network {network.name}")
-
-    path: list[Link] = []
-    node = destination
-    while node is not origin:
-        link = prev_link[node]
-        path.append(link)
-        node = link.tail
-
-    path.reverse()
-    return path
+    return SearchResult(origin, dist, prev_link, resticted)

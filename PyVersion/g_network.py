@@ -1,6 +1,6 @@
 ﻿from typing import Literal
 
-from g_sp import dijkstra
+from g_sp import dijkstra, SearchResult
 
 
 CostType = Literal["c", "mc"]
@@ -120,6 +120,8 @@ class Network:
         self.num_od: int = 0
         self.total_flow: float = 0.0
 
+        self.bushes: list[Bush] = []
+
     def add_link(self,
         tail_id: int,
         head_id: int,
@@ -179,6 +181,7 @@ class Network:
             link.update_cost_and_marginal_cost()
         for od in self.od_set:
             od.working_set = []
+        self.bushes = []
 
     @property
     def tstt(self) -> float:
@@ -193,7 +196,20 @@ class Network:
             origin = self.node_set[origin-1]
         if isinstance(destination, int):
             destination = self.node_set[destination-1]
-        return Path(origin, destination, dijkstra(self, origin, destination, cost_type))
+        search_result = dijkstra(self, origin, destination, cost_type, resticted=True, pre_terminate=True)
+        return Path(origin, destination, search_result.path_to(destination))
+    
+    def construct_bushes(self) -> None:
+        od_sort_by_origin: dict[int, list[OD]] = {i: [] for i in range(self.num_node)}
+        for od in self.od_set:
+            od_sort_by_origin[od.origin.node_id].append(od)
+        
+        for origin, ods in od_sort_by_origin.items():
+            if not ods:  # only construct bush for nodes that are origins
+                continue
+            bush = Bush(self.node_set[origin], self, ods)
+            self.bushes.append(bush)
+
 
 class OD:
     def __init__(self, origin: Node, destination: Node, demand: float, network: Network):
@@ -208,3 +224,74 @@ class OD:
 
     def shortest_path(self, cost_type: CostType = "c") -> Path:
         return self.network.shortest_path(self.origin, self.destination, cost_type)
+
+
+class Bush:
+    def __init__(self, origin: Node, network: Network, included_ods: list[OD]):
+        self.origin = origin
+        self.network = network
+        self.included_ods: list[OD] = included_ods
+        self.tree_links: list[Link] = []
+        self.min_dist: dict[Node, float] = {node: float("inf") for node in self.network.node_set}
+        self.max_dist: dict[Node, float] = {node: float("-inf") for node in self.network.node_set}
+        self.min_pred: dict[Node, Link | None] = {node: None for node in self.network.node_set}
+        self.max_pred: dict[Node, Link | None] = {node: None for node in self.network.node_set}
+    
+    def search_sp(self, cost_type: CostType = "c", pre_terminate: bool = False) -> SearchResult:
+        return dijkstra(self.network, self.origin, cost_type=cost_type, pre_terminate=pre_terminate)
+
+    def topological_order_and_adjacency(self) -> tuple[list[Node], dict[Node, list[Link]]]:
+        out_links = {node: [] for node in self.network.node_set}
+        indegree = {node: 0 for node in self.network.node_set}
+
+        for link in self.tree_links:
+            out_links[link.tail].append(link)
+            indegree[link.head] += 1
+
+        queue = [node for node in self.network.node_set if indegree[node] == 0]
+        topo_order, qi = [], 0
+        while qi < len(queue):
+            node = queue[qi]
+            qi += 1
+            topo_order.append(node)
+            for link in out_links[node]:
+                indegree[link.head] -= 1
+                if indegree[link.head] == 0:
+                    queue.append(link.head)
+
+        if len(topo_order) != self.network.num_node:
+            raise ValueError(f"Cycle detected in bush rooted at node {self.origin.node_id}")
+
+        return topo_order, out_links
+
+    def ascending_pass(self, cost_type: CostType = "c") -> None:
+        self.min_dist = {node: float("inf") for node in self.network.node_set}
+        self.max_dist = {node: float("-inf") for node in self.network.node_set}
+        self.min_pred = {node: None for node in self.network.node_set}
+        self.max_pred = {node: None for node in self.network.node_set}
+        self.min_dist[self.origin] = 0.0
+        self.max_dist[self.origin] = 0.0
+
+        topo_order, out_links = self.topological_order_and_adjacency()
+        for node in topo_order:
+            min_u = self.min_dist[node]
+            max_u = self.max_dist[node]
+            if min_u == float("inf") and max_u == float("-inf"):
+                continue
+
+            for link in out_links[node]:
+                edge_cost = link.cost if cost_type == "c" else link.marginal_cost
+                head = link.head
+
+                cand_min = min_u + edge_cost
+                if cand_min < self.min_dist[head]:
+                    self.min_dist[head] = cand_min
+                    self.min_pred[head] = link
+
+                cand_max = max_u + edge_cost
+                if cand_max > self.max_dist[head]:
+                    self.max_dist[head] = cand_max
+                    self.max_pred[head] = link
+    
+    def max_dist_diff(self) -> float:
+        return max(self.max_dist[node] - self.min_dist[node] for node in self.network.node_set)
