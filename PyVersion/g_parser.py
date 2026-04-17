@@ -78,7 +78,7 @@ class NetworkParser:
                     lines = lines[i:]
                     break
 
-            origin_id = None
+            origin_id, parsed_demand = None, 0.0
             for line in lines:
                 if "Origin" in line:
                     origin_id = int(line[-1])
@@ -86,13 +86,13 @@ class NetworkParser:
                     for i in range(len(line) // 2):
                         destination_id = int(line[2 * i])
                         demand = float(line[2 * i + 1]) * network.demand_level
+                        parsed_demand += demand
                         if demand != 0.0 and origin_id is not None:
                             network.add_od(origin_id - 1, destination_id - 1, demand)
 
-        parsed = sum(od.demand for od in network.od_set)
-        network.total_flow = parsed
-
         if total_flow is not None:
             expected = total_flow * network.demand_level
-            if expected > 0.0 and abs(parsed - expected) / expected > 0.01:
-                raise ValueError(f"Inconsistent demand in {file_path}: parsed={parsed}, expected={expected}")
+            if expected > 0.0 and abs(parsed_demand - expected) / expected > 0.01:
+                raise ValueError(f"Inconsistent demand in {file_path}: parsed={parsed_demand}, expected={expected}")
+
+        network.total_flow = sum(od.demand for od in network.od_set)

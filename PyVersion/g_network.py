@@ -183,8 +183,16 @@ class Network:
     @property
     def tstt(self) -> float:
         return sum(link.cost * link.flow for link in self.link_set)
+    
+    @property
+    def tsmtt(self) -> float:
+        return sum(link.marginal_cost * link.flow for link in self.link_set)
 
-    def shortest_path(self, origin: Node, destination: Node, cost_type: CostType = "c") -> Path:
+    def shortest_path(self, origin: Node | int, destination: Node | int, cost_type: CostType = "c") -> Path:
+        if isinstance(origin, int):
+            origin = self.node_set[origin-1]
+        if isinstance(destination, int):
+            destination = self.node_set[destination-1]
         return Path(origin, destination, dijkstra(self, origin, destination, cost_type))
 
 class OD:
