@@ -248,15 +248,60 @@ class Bush:
             forbidden_links = [link for link in self.network.link_set if link not in self.tree_links]
             return dijkstra(self.network, self.origin, cost_type=cost_type, pre_terminate=pre_terminate, forbidden_links=forbidden_links)
 
-    def topological_order_and_adjacency(self) -> tuple[list[Node], dict[Node, list[Link]]]:
-        out_links = {node: [] for node in self.network.node_set}
-        indegree = {node: 0 for node in self.network.node_set}
+    def initialize(self, cost_type: CostType = "c") -> None:
+        search_result = self.search_sp(cost_type=cost_type, pre_terminate=False)
+        self.tree_links = {link: 0.0 for link in search_result.prev_link.values() if link is not None}
+        for od in self.included_ods:
+            for link in search_result.path_to(od.destination):
+                self.add_flow(link, od.demand)
 
+        if cost_type == "c":
+            self.network.update_all_link_cost()
+        else:
+            self.network.update_all_link_marginal_cost()
+    
+    def expand(self, cost_type: CostType = "c") -> None:
+        self.update_ascending_pass(cost_type=cost_type)
+
+        candidates_intersection: list[Link] = []
+        candidates_p2: list[Link] = []
+
+        for link in self.network.link_set:
+            # only consider links outside the current bush
+            if link in self.tree_links:
+                continue
+
+            edge_cost = link.cost if cost_type == "c" else link.marginal_cost
+            if (self.max_dist[link.tail] + edge_cost) < self.max_dist[link.head]:
+                candidates_p2.append(link)
+                if (self.min_dist[link.tail] + edge_cost) < self.min_dist[link.head]:
+                    candidates_intersection.append(link)
+
+        chosen = candidates_intersection if candidates_intersection else candidates_p2
+
+        for link in chosen:
+            self.tree_links[link] = 0.0
+    
+    def remove_unused_links(self) -> None:
+        indegree = self.get_node_indegree()
+        to_remove: list[Link] = []
+
+        for link, flow in self.tree_links.items():
+            if flow == 0 and indegree[link.head] > 1:
+                indegree[link.head] -= 1
+                to_remove.append(link)
+
+        for link in to_remove:
+            del self.tree_links[link]
+    
+    def _topological_order_and_adjacency(self) -> tuple[list[Node], dict[Node, list[Link]]]:
+        out_links = {node: [] for node in self.network.node_set}
         for link in self.tree_links:
             out_links[link.tail].append(link)
-            indegree[link.head] += 1
 
-        queue = [node for node in self.network.node_set if indegree[node] == 0]
+        indegree = self.get_node_indegree()
+
+        queue = [self.origin]
         topo_order, qi = [], 0
         while qi < len(queue):
             node = queue[qi]
@@ -266,9 +311,9 @@ class Bush:
                 indegree[link.head] -= 1
                 if indegree[link.head] == 0:
                     queue.append(link.head)
-        
+
         if len(topo_order) != self.network.num_node:
-            raise ValueError(f"Cycle detected in bush rooted at node {self.origin.node_id}")
+            raise ValueError(f"Cycle detected in bush rooted at node {self.origin.node_id+1}")
 
         return topo_order, out_links
 
@@ -280,14 +325,11 @@ class Bush:
         self.min_dist[self.origin] = 0.0
         self.max_dist[self.origin] = 0.0
 
-        topo_order, out_links = self.topological_order_and_adjacency()
-        self.topo_order = topo_order
-        for node in topo_order:
+        self.topo_order, out_links = self._topological_order_and_adjacency()
+        for node in self.topo_order:
             min_u = self.min_dist[node]
             max_u = self.max_dist[node]
-            if min_u == float("inf") and max_u == float("-inf"):
-                continue
-
+            
             for link in out_links[node]:
                 edge_cost = link.cost if cost_type == "c" else link.marginal_cost
                 head = link.head
@@ -303,9 +345,15 @@ class Bush:
                     self.max_pred[head] = link
     
     def max_dist_diff(self) -> float:
-        return max(self.max_dist[node] - self.min_dist[node] for node in self.network.node_set)
+        return max([self.max_dist[node] - self.min_dist[node] for node in self.topo_order])
     
     def add_flow(self, link: Link, flow: float) -> None:
         self.tree_links[link] += flow
         link.flow += flow
+
+    def get_node_indegree(self) -> dict[Node, int]:
+        indegree = {node: 0 for node in self.network.node_set}
+        for link in self.tree_links:
+            indegree[link.head] += 1
+        return indegree
     

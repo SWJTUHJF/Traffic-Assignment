@@ -68,8 +68,8 @@ def dijkstra(
     return SearchResult(origin, dist, prev_link, resticted)
 
 
-def nodes_from_links(origin: Node, links: list[Link]) -> list[Node]:
-    nodes = [origin]
+def nodes_from_links(links: list[Link]) -> list[Node]:
+    nodes = [links[0].tail]
     for link in links:
         nodes.append(link.head)
     return nodes

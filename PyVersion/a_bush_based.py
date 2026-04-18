@@ -2,7 +2,7 @@
 
 from g_sp import SearchResult, nodes_from_links
 from a_base_solver import BaseSolver
-from g_network import Network
+from g_network import Network, Bush, Link, Node
 
 
 class DBA(BaseSolver):  # Dial 2006
@@ -13,112 +13,118 @@ class DBA(BaseSolver):  # Dial 2006
         self.solve(network, cost_type="mc", tol_gap=tol_gap, verbose=verbose)
         
     def initialize(self) -> None:
+        self.network.reset_assignment()
         self.network.construct_bushes()
-
         for bush in self.network.bushes:
-            search_result = bush.search_sp(cost_type=self.cost_type, pre_terminate=False)
-            bush.tree_links = {link: 0 for link in search_result.prev_link.values() if link is not None}
-            for od in bush.included_ods:
-                for link in search_result.path_to(od.destination):
-                    bush.add_flow(link, od.demand)
-
-        if self.cost_type == "c":
-            self.network.update_all_link_cost()
-        else:
-            self.network.update_all_link_marginal_cost()
+            bush.initialize(self.cost_type)
 
     def main_loop_step(self) -> None:
-        self.expand_bushes()
-        self.update_bushes_flow()
-        self.remove_unused_links()
-    
-    # def expand_bushes(self) -> None:
-    #     for bush in self.network.bushes:
-    #         search_result = bush.search_sp(cost_type=self.cost_type, pre_terminate=False, global_sp=False)
-    #         for link in self.network.link_set:
-    #             tail_dist, head_dist = search_result.dist[link.tail], search_result.dist[link.head]
-    #             edge_cost = link.cost if self.cost_type == "c" else link.marginal_cost
-    #             if link not in bush.tree_links and tail_dist + edge_cost < head_dist:
-    #                 bush.tree_links[link] = 0
-
-    # expand_bushes
-    def expand_bushes(self) -> None:
         for bush in self.network.bushes:
-            bush.update_ascending_pass(cost_type=self.cost_type)
-            for link in self.network.link_set:
-                if link in bush.tree_links:
-                    continue
+            bush.expand(self.cost_type)
+            self.update_bushes_flow(bush)
+            bush.remove_unused_links()
 
-                c = link.cost if self.cost_type == "c" else link.marginal_cost
-                u_i = bush.min_dist[link.tail]
-                u_j = bush.min_dist[link.head]
-                U_i = bush.max_dist[link.tail]
-                U_j = bush.max_dist[link.head]
+    def update_bushes_flow(self, bush: Bush, epsilon: float = 1e-12) -> None:
+        def path_from_pred(pred: dict[Node, Link | None], destination: Node) -> list[Link]:
+            links: list[Link] = []
+            node = destination
+            while node is not bush.origin:
+                link = pred[node]
+                if link is None:
+                    return []
+                links.append(link)
+                node = link.tail
+            links.reverse()
+            return links
 
-                if u_i == float("inf") or u_j == float("inf"):
-                    continue
-                if U_i == float("-inf") or U_j == float("-inf"):
-                    continue
+        # Step 0: update current costs on links in the bush
+        for link in bush.tree_links:
+            if self.cost_type == "c":
+                link.update_cost()
+            else:
+                link.update_marginal_cost()
 
-                if u_i + c < u_j and U_i + c < U_j:
-                    bush.tree_links[link] = 0.0
+        # Step 1: ascending pass
+        bush.update_ascending_pass(cost_type=self.cost_type)
 
+        # Step 2: convergence test for this bush
+        if bush.max_dist_diff() < epsilon:
+            return
 
-    def update_bushes_flow(self) -> None:
-        for bush in self.network.bushes:
-            # 1 Ascending pass
-            bush.update_ascending_pass(cost_type=self.cost_type)
-
-            # 2 Convergence test
-            if bush.max_dist_diff() < self.tol_gap:
+        # Step 3: descending pass
+        for node_j in reversed(bush.topo_order):
+            if node_j is bush.origin:
                 continue
-            # 3 Descending pass
-            d_topo_order = bush.topo_order[::-1]
-            for node_j in d_topo_order:
-                if node_j is bush.origin:
-                    continue
-                if bush.min_pred[node_j] is None or bush.max_pred[node_j] is None:
-                    continue
+            longest_path = path_from_pred(bush.max_pred, node_j)
+            shortest_path = path_from_pred(bush.min_pred, node_j)
 
-                search_result_sp = SearchResult(bush.origin, bush.min_dist, bush.min_pred)
-                search_result_lp = SearchResult(bush.origin, bush.max_dist, bush.max_pred)
-                sp, lp = search_result_sp.path_to(node_j), search_result_lp.path_to(node_j)
-                s_nodes, l_nodes = nodes_from_links(bush.origin, sp), nodes_from_links(bush.origin, lp)
+            if longest_path == shortest_path:
+                continue
 
-                common_idx = 0
-                common_len = min(len(s_nodes), len(l_nodes))
-                while common_idx + 1 < common_len and s_nodes[common_idx + 1] is l_nodes[common_idx + 1]:
-                    common_idx += 1
+            longest_nodes = nodes_from_links(longest_path)
+            shortest_nodes = nodes_from_links(shortest_path)
 
-                node_i = s_nodes[common_idx]
-                if node_i is node_j:
-                    continue
+            common_node = None
+            for node in longest_nodes[:-1]:
+                if node in shortest_nodes:
+                    common_node = node
+            if common_node is None:
+                raise ValueError(f"No common node found in longest and shortest paths")
+            
+            # common_node = bush.origin
+            # for i in range(min(len(longest_nodes), len(shortest_nodes))):
+            #     if longest_nodes[i] == shortest_nodes[i]:
+            #         common_node = longest_nodes[i]
+            #     else:
+            #         break
+            
+            for link_id, link in enumerate(longest_path):
+                if link.tail == common_node:
+                    longest_path = longest_path[link_id:]
+                    break
+            
+            for link_id, link in enumerate(shortest_path):
+                if link.tail == common_node:
+                    shortest_path = shortest_path[link_id:]
+                    break
 
-                # p_i and P_i are the common shortest/longest prefixes from origin to i.
-                p_i = sp[:common_idx]
-                P_i = lp[:common_idx]
-                shortest_j = sp[common_idx:]
-                longest_j = lp[common_idx:]
+            numerator = (bush.max_dist[node_j] - bush.max_dist[common_node]) - (bush.min_dist[node_j] - bush.min_dist[common_node])
+            xor_link = set(longest_path) | set(shortest_path)
 
-                # g = (bush.max_dist[node_j] - bush.max_dist[node_i]) - (bush.min_dist[node_j] - bush.min_dist[node_i])
-                short_cost = sum(link.cost for link in shortest_j)
-                long_cost = sum(link.cost for link in longest_j)
-                g = long_cost - short_cost
+            if self.cost_type == "c":
+                denominator = sum(link.d_cost for link in xor_link)
+            else:
+                denominator = sum(link.d_marginal_cost for link in xor_link)
+            # if denominator < 0.0:
+            #     raise ValueError(f"Non-positive denominator encountered in flow update: {denominator}")
 
-                union_links = set(shortest_j) | set(longest_j)
-                h = sum(link.d_cost if self.cost_type == "c" else link.d_marginal_cost for link in union_links)
-                dx = min(g / h, min(bush.tree_links[link] for link in longest_j))
+            # longest segment flow bound must use bush-specific flow
+            considered_links = [link for link in longest_path if link not in shortest_path]
+            if not considered_links:
+                continue
+            else:
+                max_shift = min(bush.tree_links[link] for link in considered_links)
+            if max_shift < 0.0:
+                raise ValueError(f"Negative max_shift encountered: {max_shift}")
 
-                for link in shortest_j:
-                    bush.add_flow(link, dx)
-                for link in longest_j:
-                    bush.add_flow(link, -dx)
-                self.network.update_all_link_cost() if self.cost_type == "c" else self.network.update_all_link_marginal_cost()
-    
-    def remove_unused_links(self) -> None:
-        for bush in self.network.bushes:
-            bush.tree_links = {link: flow for link, flow in bush.tree_links.items() if flow > 0}
+            dx = min(numerator / denominator, max_shift)
+            if dx < 0.0:
+                raise ValueError(f"Negative flow shift computed: {dx}")
 
+            # Step 3.2: update flows
+            for link in shortest_path:
+                bush.add_flow(link, dx)
+
+            for link in longest_path:
+                bush.add_flow(link, -dx)
+
+            # Step 3.3: update costs on affected links
+            affected_links = set(shortest_path) | set(longest_path)
+            for link in affected_links:
+                if self.cost_type == "c":
+                    link.update_cost()
+                else:
+                    link.update_marginal_cost()
 
 class BBA(BaseSolver):  # Bar-Gera 2002
     def run_BBA_UE(self, network: Network, tol_gap: float = 1e-4, verbose: bool = False) -> None:

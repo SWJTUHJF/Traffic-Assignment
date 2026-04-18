@@ -60,9 +60,8 @@ class NetworkParser:
                 alpha=float(line[5]),
                 beta=float(line[6]),
             )
-
         if network.num_link != num_link:
-            raise ValueError(f"Expected {num_link} links, parsed {network.num_link} in {file_path}")
+            print(f"Warning: Expected {num_link} links, parsed {network.num_link} in {file_path}")
 
     def _read_trips(self, network: Network, file_path: Path) -> None:
         with open(file_path) as f:
