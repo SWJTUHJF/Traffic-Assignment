@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from dataclasses import dataclass
+from encodings.punycode import T
 from heapq import heappop, heappush
 from typing import Literal, TYPE_CHECKING
 
@@ -11,9 +12,9 @@ if TYPE_CHECKING:
 @dataclass
 class SearchResult:
     origin: Node
-    dist: dict
-    prev_link: dict
-    _resticted: bool
+    dist: dict[Node, float]
+    prev_link: dict[Node, Link | None]
+    _resticted: bool = True
 
     def path_to(self, destination) -> list[Link]:
         if self.prev_link[destination] is None:
@@ -38,6 +39,7 @@ def dijkstra(
     cost_type: Literal["c", "mc"] = "c",
     resticted: bool = True,
     pre_terminate: bool = True,
+    forbidden_links: list[Link] | None = None,
 ) -> SearchResult:
     dist: dict[Node, float] = {node: float('inf') for node in network.node_set}
     prev_link: dict[Node, Link | None] = {node: None for node in network.node_set}
@@ -53,6 +55,8 @@ def dijkstra(
             break
 
         for link in current.link_out:
+            if forbidden_links is not None and link in forbidden_links:
+                continue
             edge_cost = link.cost if cost_type == "c" else link.marginal_cost
             nxt = link.head
             proposal = current_dist + edge_cost
@@ -62,3 +66,10 @@ def dijkstra(
                 heappush(pq, (proposal, nxt.node_id, nxt))
 
     return SearchResult(origin, dist, prev_link, resticted)
+
+
+def nodes_from_links(origin: Node, links: list[Link]) -> list[Node]:
+    nodes = [origin]
+    for link in links:
+        nodes.append(link.head)
+    return nodes

@@ -53,7 +53,7 @@ class BaseSolver:
             self.main_loop_step()
             self.cur_gap = self.compute_gap()
             if self.verbose:
-                print(f"Iteration {self.iter_times}: current gap = {self.cur_gap:.1e}")
+                print(f"Iteration {self.iter_times}: current gap = {self.cur_gap:.1e}, TSTT = {self.network.tstt:.1f}")
 
         self.postprocess()
         self.report()

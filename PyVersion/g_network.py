@@ -1,4 +1,6 @@
-﻿from typing import Literal
+﻿from encodings.punycode import T
+from os import name
+from typing import Literal
 
 from g_sp import dijkstra, SearchResult
 
@@ -231,14 +233,20 @@ class Bush:
         self.origin = origin
         self.network = network
         self.included_ods: list[OD] = included_ods
-        self.tree_links: list[Link] = []
+
+        self.tree_links: dict[Link, float] = {}  # link: flow
         self.min_dist: dict[Node, float] = {node: float("inf") for node in self.network.node_set}
         self.max_dist: dict[Node, float] = {node: float("-inf") for node in self.network.node_set}
         self.min_pred: dict[Node, Link | None] = {node: None for node in self.network.node_set}
         self.max_pred: dict[Node, Link | None] = {node: None for node in self.network.node_set}
+        self.topo_order: list[Node] = []
     
-    def search_sp(self, cost_type: CostType = "c", pre_terminate: bool = False) -> SearchResult:
-        return dijkstra(self.network, self.origin, cost_type=cost_type, pre_terminate=pre_terminate)
+    def search_sp(self, cost_type: CostType = "c", pre_terminate: bool = False, global_sp: bool = True) -> SearchResult:
+        if global_sp:
+            return dijkstra(self.network, self.origin, cost_type=cost_type, pre_terminate=pre_terminate)
+        else:
+            forbidden_links = [link for link in self.network.link_set if link not in self.tree_links]
+            return dijkstra(self.network, self.origin, cost_type=cost_type, pre_terminate=pre_terminate, forbidden_links=forbidden_links)
 
     def topological_order_and_adjacency(self) -> tuple[list[Node], dict[Node, list[Link]]]:
         out_links = {node: [] for node in self.network.node_set}
@@ -258,13 +266,13 @@ class Bush:
                 indegree[link.head] -= 1
                 if indegree[link.head] == 0:
                     queue.append(link.head)
-
+        
         if len(topo_order) != self.network.num_node:
             raise ValueError(f"Cycle detected in bush rooted at node {self.origin.node_id}")
 
         return topo_order, out_links
 
-    def ascending_pass(self, cost_type: CostType = "c") -> None:
+    def update_ascending_pass(self, cost_type: CostType = "c") -> None:
         self.min_dist = {node: float("inf") for node in self.network.node_set}
         self.max_dist = {node: float("-inf") for node in self.network.node_set}
         self.min_pred = {node: None for node in self.network.node_set}
@@ -273,6 +281,7 @@ class Bush:
         self.max_dist[self.origin] = 0.0
 
         topo_order, out_links = self.topological_order_and_adjacency()
+        self.topo_order = topo_order
         for node in topo_order:
             min_u = self.min_dist[node]
             max_u = self.max_dist[node]
@@ -295,3 +304,8 @@ class Bush:
     
     def max_dist_diff(self) -> float:
         return max(self.max_dist[node] - self.min_dist[node] for node in self.network.node_set)
+    
+    def add_flow(self, link: Link, flow: float) -> None:
+        self.tree_links[link] += flow
+        link.flow += flow
+    
