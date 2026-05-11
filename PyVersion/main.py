@@ -4,13 +4,18 @@ from a_link_based import FrankWolfe as FW, MSA
 from a_bush_based import DBA, BBA, NBA, QBA
 
 
+"""
+* The index of nodes and links in the code starts from 0.
+"""
+
+
 if __name__ == "__main__":
     parser = NP()
     # net = parser.load("ChicagoSketch", demand_level=1.0)
-    net = parser.load("Barcelona", demand_level=1.0)
-    # solver = GP()
-    # solver.run_GP_UE(net, verbose=True, tol_gap=1e-4)
-    solver = DBA()
-    solver.run_DBA_UE(net, verbose=True, tol_gap=1e-12)
+    net = parser.load("SiouxFalls", demand_level=1.0)
+    solver = GP()
+    solver.run_GP_UE(net, verbose=True, tol_gap=1e-4)
+    # solver = DBA()
+    # solver.run_DBA_UE(net, verbose=True, tol_gap=1e-12)
     # solver = GP()
     # solver.run_GP_UE(net, verbose=True, tol_gap=1e-12)

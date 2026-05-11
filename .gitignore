@@ -5,6 +5,7 @@ PyVersion/__pycache__
 PyVersion/data
 
 CppVersion/data
+CppVersion/build/
 
 CppVersion/test.py
 

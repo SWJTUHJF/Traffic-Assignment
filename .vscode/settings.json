@@ -1,0 +1,6 @@
+{
+    "code-runner.executorMap": {
+        "cpp": "cd $workspaceRoot\\CppVersion && g++ -std=c++23 -I include src\\main.cpp src\\network.cpp src\\parser.cpp src\\shortest_path.cpp src\\solver_base.cpp src\\link_based.cpp -o build\\traffic_assignment.exe && .\\build\\traffic_assignment.exe"
+    },
+    "C_Cpp.default.cppStandard": "c++23"
+}

@@ -1,9 +1,10 @@
 ﻿from __future__ import annotations
 
 from dataclasses import dataclass
-from encodings.punycode import T
 from heapq import heappop, heappush
-from typing import Literal, TYPE_CHECKING
+from typing import TYPE_CHECKING
+
+from utilities import CostType
 
 if TYPE_CHECKING:
     from g_network import Link, Network, Node
@@ -14,7 +15,7 @@ class SearchResult:
     origin: Node
     dist: dict[Node, float]
     prev_link: dict[Node, Link | None]
-    _resticted: bool = True
+    _resticted: bool = True  # whether allow the occurence of disconnectivity
 
     def path_to(self, destination) -> list[Link]:
         if self.prev_link[destination] is None:
@@ -36,9 +37,9 @@ def dijkstra(
     network: Network,
     origin: Node,
     destination: Node | None = None,
-    cost_type: Literal["c", "mc"] = "c",
-    resticted: bool = True,
-    pre_terminate: bool = True,
+    kind: CostType = "tt",
+    resticted: bool = True,  # if restricted, raise error when no path exists
+    pre_terminate: bool = True,  # true if only need one-to-to label
     forbidden_links: list[Link] | None = None,
 ) -> SearchResult:
     dist: dict[Node, float] = {node: float('inf') for node in network.node_set}
@@ -57,7 +58,7 @@ def dijkstra(
         for link in current.link_out:
             if forbidden_links is not None and link in forbidden_links:
                 continue
-            edge_cost = link.cost if cost_type == "c" else link.marginal_cost
+            edge_cost = link.cost(kind=kind)
             nxt = link.head
             proposal = current_dist + edge_cost
             if proposal < dist[nxt]:
